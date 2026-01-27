@@ -1,0 +1,176 @@
+BL51 BANKED LINKER/LOCATER V6.22                                                        10/27/2022  08:47:38  PAGE 1
+
+
+BL51 BANKED LINKER/LOCATER V6.22, INVOKED BY:
+D:\KEIL4\C51\BIN\BL51.EXE STARTUP.obj, 180度舵机.obj TO 180度舵机
+
+
+MEMORY MODEL: SMALL
+
+
+INPUT MODULES INCLUDED:
+  STARTUP.obj (?C_STARTUP)
+  180度舵机.obj (180度舵籣)
+  D:\KEIL4\C51\LIB\C51S.LIB (?C_INIT)
+
+
+LINK MAP OF MODULE:  180度舵机 (?C_STARTUP)
+
+
+            TYPE    BASE      LENGTH    RELOCATION   SEGMENT NAME
+            -----------------------------------------------------
+
+            * * * * * * *   D A T A   M E M O R Y   * * * * * * *
+            REG     0000H     0008H     ABSOLUTE     "REG BANK 0"
+            DATA    0008H     0002H     UNIT         ?DT?180度舵籣
+            DATA    000AH     0002H     UNIT         _DATA_GROUP_
+            IDATA   000CH     0001H     UNIT         ?STACK
+
+            * * * * * * *   C O D E   M E M O R Y   * * * * * * *
+            CODE    0000H     0003H     ABSOLUTE     
+            CODE    0003H     0007H     UNIT         ?C_INITSEG
+                    000AH     0011H                  *** GAP ***
+            CODE    001BH     0003H     ABSOLUTE     
+            CODE    001EH     008CH     UNIT         ?C_C51STARTUP
+            CODE    00AAH     0043H     UNIT         ?PR?_DELAY1MS?180度舵籣
+            CODE    00EDH     002FH     UNIT         ?PR?MAIN?180度舵籣
+            CODE    011CH     0028H     UNIT         ?PR?TIME1?180度舵籣
+
+
+
+OVERLAY MAP OF MODULE:   180度舵机 (?C_STARTUP)
+
+
+SEGMENT                           DATA_GROUP 
+  +--> CALLED SEGMENT           START    LENGTH
+-----------------------------------------------
+?C_C51STARTUP                   -----    -----
+  +--> ?PR?MAIN?180度舵籣
+  +--> ?C_INITSEG
+
+?PR?MAIN?180度舵籣              -----    -----
+  +--> ?PR?_DELAY1MS?180度舵籣
+
+?PR?_DELAY1MS?180度舵籣         000AH    0002H
+
+
+
+SYMBOL TABLE OF MODULE:  180度舵机 (?C_STARTUP)
+
+  VALUE           TYPE          NAME
+  ----------------------------------
+BL51 BANKED LINKER/LOCATER V6.22                                                      10/27/2022  08:47:38  PAGE 2
+
+
+
+  -------         MODULE        ?C_STARTUP
+  C:001EH         SEGMENT       ?C_C51STARTUP
+  I:000CH         SEGMENT       ?STACK
+  C:0000H         PUBLIC        ?C_STARTUP
+  D:00E0H         SYMBOL        ACC
+  D:00F0H         SYMBOL        B
+  D:0083H         SYMBOL        DPH
+  D:0082H         SYMBOL        DPL
+  N:0000H         SYMBOL        IBPSTACK
+  N:0100H         SYMBOL        IBPSTACKTOP
+  N:0080H         SYMBOL        IDATALEN
+  C:0021H         SYMBOL        IDATALOOP
+  N:0000H         SYMBOL        PBPSTACK
+  N:0100H         SYMBOL        PBPSTACKTOP
+  N:0000H         SYMBOL        PDATALEN
+  N:0000H         SYMBOL        PDATASTART
+  N:0000H         SYMBOL        PPAGE
+  N:0000H         SYMBOL        PPAGEENABLE
+  D:00A0H         SYMBOL        PPAGE_SFR
+  D:0081H         SYMBOL        SP
+  C:001EH         SYMBOL        STARTUP1
+  N:0000H         SYMBOL        XBPSTACK
+  N:0000H         SYMBOL        XBPSTACKTOP
+  N:0000H         SYMBOL        XDATALEN
+  N:0000H         SYMBOL        XDATASTART
+  C:0000H         LINE#         126
+  C:001EH         LINE#         133
+  C:0020H         LINE#         134
+  C:0021H         LINE#         135
+  C:0022H         LINE#         136
+  C:0024H         LINE#         185
+  C:0027H         LINE#         196
+  -------         ENDMOD        ?C_STARTUP
+
+  -------         MODULE        180度舵籣
+  C:0000H         SYMBOL        _ICE_DUMMY_
+  D:0090H         PUBLIC        P1
+  D:00A0H         PUBLIC        P2
+  D:00B0H         PUBLIC        P3
+  B:00A8H.7       PUBLIC        EA
+  D:00A8H         PUBLIC        IE
+  D:00B8H         PUBLIC        IP
+  C:00AAH         PUBLIC        _delay1ms
+  C:00EDH         PUBLIC        main
+  D:0098H         PUBLIC        SCON
+  D:0089H         PUBLIC        TMOD
+  D:0088H         PUBLIC        TCON
+  B:00A8H.3       PUBLIC        ET1
+  D:008DH         PUBLIC        TH1
+  D:008BH         PUBLIC        TL1
+  B:0088H.6       PUBLIC        TR1
+  C:011CH         PUBLIC        time1
+  D:0008H         PUBLIC        push_val
+  D:00C8H         PUBLIC        T2CON
+  B:00A0H.0       PUBLIC        Sevro_moto_pwm
+  D:0009H         PUBLIC        pwm_val
+BL51 BANKED LINKER/LOCATER V6.22                                                      10/27/2022  08:47:38  PAGE 3
+
+
+  D:00D0H         PUBLIC        PSW
+  -------         PROC          _DELAY1MS
+  D:000AH         SYMBOL        k
+  -------         DO            
+  D:0082H         SYMBOL        a
+  D:0002H         SYMBOL        b
+  D:0004H         SYMBOL        c
+  D:0006H         SYMBOL        d
+  -------         ENDDO         
+  C:00AAH         LINE#         17
+  C:00AEH         LINE#         18
+  C:00AEH         LINE#         20
+  C:00BAH         LINE#         21
+  C:00BEH         LINE#         22
+  C:00C2H         LINE#         23
+  C:00ECH         LINE#         24
+  -------         ENDPROC       _DELAY1MS
+  -------         PROC          TIME1
+  C:011CH         LINE#         31
+  C:0120H         LINE#         33
+  C:0123H         LINE#         34
+  C:0126H         LINE#         35
+  C:0128H         LINE#         36
+  C:012FH         LINE#         37
+  C:0133H         LINE#         39
+  C:0135H         LINE#         40
+  C:013CH         LINE#         41
+  C:013FH         LINE#         42
+  -------         ENDPROC       TIME1
+  -------         PROC          MAIN
+  C:00EDH         LINE#         49
+  C:00EDH         LINE#         50
+  C:00EDH         LINE#         51
+  C:00F0H         LINE#         52
+  C:00F3H         LINE#         53
+  C:00F6H         LINE#         54
+  C:00F8H         LINE#         55
+  C:00FAH         LINE#         56
+  C:00FCH         LINE#         58
+  C:00FFH         LINE#         59
+  C:0106H         LINE#         61
+  C:0106H         LINE#         62
+  C:0106H         LINE#         63
+  C:0109H         LINE#         64
+  C:0110H         LINE#         66
+  C:0113H         LINE#         67
+  C:011AH         LINE#         68
+  -------         ENDPROC       MAIN
+  -------         ENDMOD        180度舵籣
+
+Program Size: data=13.0 xdata=0 code=307
+LINK/LOCATE RUN COMPLETE.  0 WARNING(S),  0 ERROR(S)

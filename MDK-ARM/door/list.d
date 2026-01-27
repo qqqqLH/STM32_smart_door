@@ -1,0 +1,12 @@
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/list.c
+door\list.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/FreeRTOS.h
+door\list.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stddef.h
+door\list.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+door\list.o: ../Core/Inc/FreeRTOSConfig.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/projdefs.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/portable.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/deprecated_definitions.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM3/portmacro.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/mpu_wrappers.h
+door\list.o: ../Middlewares/Third_Party/FreeRTOS/Source/include/list.h
