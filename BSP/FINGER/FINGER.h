@@ -22,6 +22,22 @@ typedef struct
   uint32_t timeout_ms;
 } FINGER_Handle;
 
+/* Inspect in the debugger; counters are cumulative since FINGER_Init. */
+typedef struct
+{
+  volatile uint32_t received_packets;
+  volatile uint32_t uart_errors;
+  volatile uint32_t last_uart_error;
+  volatile uint32_t overruns;
+  volatile uint32_t ring_overflows;
+  volatile uint32_t bad_packets;
+  volatile uint32_t timeouts;
+  volatile uint32_t recoveries;
+} FINGER_Diagnostics;
+extern FINGER_Diagnostics g_finger_diag;
+
+/* Call only from the owning finger task, after the scheduler has started. */
+
 void FINGER_Init(FINGER_Handle *handle, UART_HandleTypeDef *uart);
 void FINGER_SetAddress(FINGER_Handle *handle, uint32_t address);
 void FINGER_SetTimeout(FINGER_Handle *handle, uint32_t timeout_ms);

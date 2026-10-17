@@ -25,6 +25,8 @@
 #include "task.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "usart.h"
+#include "oled.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -242,5 +244,19 @@ void USART3_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA1_Channel2_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_usart3_tx);
+}
+
+void DMA1_Channel3_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_usart3_rx);
+}
+
+void DMA1_Channel5_IRQHandler(void)
+{
+  OLED_DMA_IRQHandler();
+}
 
 /* USER CODE END 1 */

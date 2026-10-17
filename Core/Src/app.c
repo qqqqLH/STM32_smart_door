@@ -1,4 +1,5 @@
 #include "app.h"
+#include "BEEP.h"
 
 //手册一页写了支持30级音量调节
 static const uint8_t s_volume_table[APP_VOLUME_LEVELS] = { 10u, 15u, 20u, 25u, 30u };
@@ -32,18 +33,11 @@ static void App_BuildPwdLine(uint8_t len, char *dst)
   dst[16] = '\0';//在数组的最后加入字符串结束符
 }
 
-//指纹模组的中断线ture为高电平也就是按下了就会高电平
-//这个函数是用来释放指纹模组的，因为在上升沿触发的过程中我测试了可能触发两次中断
-//这个原因可能是因为电平的震荡一会0一会1的，处理完指纹的识别或者录入等流程，手动再开启中断
-//我们在进入一次中断之后一直循环读取是否，
+/* Re-arm without trapping the worker while a finger remains on the sensor. */
+static uint8_t s_finger_irq_rearm;
 static void App_FingerIrqRelease(void)
 {
-  while (HAL_GPIO_ReadPin(FINGER_IRQ_GPIO_Port, FINGER_IRQ_Pin) == GPIO_PIN_SET)//不断循环读取电平状态
-  {
-    vTaskDelay(pdMS_TO_TICKS(10));//10ms读取一次，等待指纹模组中断线返回为低电平，就是手指离开了指纹模组，退出循环
-  }
-  __HAL_GPIO_EXTI_CLEAR_IT(FINGER_IRQ_Pin);//退出循环后把中断标志位清空不然一直触发中断
-  HAL_NVIC_EnableIRQ(FINGER_IRQ_EXTI_IRQn);//然后再次使能中断检测
+  s_finger_irq_rearm = 1u;
 }
 
 //更改配置之后调用整个函数保存配置
@@ -237,18 +231,10 @@ static uint8_t App_ReadCard(uint32_t *uid)
 static void App_ShowLine(uint8_t row, const char *text, char *cache)
 {
   char line[17];// 存储格式化后的16字符显示行（+1位结束符）
-  char blank[17];// 存储16个空格的清空行
-
-  App_BuildLine(line, text);//将原始文本text格式化为 16 字符长度的标准行（超出截断、不足补空格）；
-  if (strncmp(cache, line, 16) == 0)//如果没有变化那就不更新了，直接退出
-  {
-    return;
-  }
-  //如果有变换，先把blank清空，并且补最后一个结束符
-  memset(blank, ' ', 16);
-  blank[16] = '\0';
-  OLED_ShowString(0, (u8)(row * 2u), (u8 *)blank, APP_OLED_FONT);//然后清空单行，因为如果清空整个屏幕刷新很慢，给一行全写空格最快
-  OLED_ShowString(0, (u8)(row * 2u), (u8 *)line, APP_OLED_FONT);//写真正的内容，也就是刷新行
+  App_BuildLine(line, text);
+  if (strncmp(cache, line, 16) == 0) { return; }
+  /* Spaces in the padded line overwrite old glyphs in RAM in one pass. */
+  OLED_ShowString(0, (u8)(row * 2u), (u8 *)line, APP_OLED_FONT);
   strncpy(cache, line, 16);//将line复制到cache，作为上次现实的内容，用来和下次的内容进行比对
   cache[16] = '\0';
 }
@@ -256,10 +242,12 @@ static void App_ShowLine(uint8_t row, const char *text, char *cache)
 //显示整个屏幕四行只需要调用一次整个函数，把每一行的字符串都传入到这个，不用调用四次函数了
 static void App_ShowLines(const char *line1, const char *line2, const char *line3, const char *line4)
 {
+  OLED_BeginFrame();
   App_ShowLine(0u, line1, s_lines[0]);
   App_ShowLine(1u, line2, s_lines[1]);
   App_ShowLine(2u, line3, s_lines[2]);
   App_ShowLine(3u, line4, s_lines[3]);
+  OLED_EndFrame();
 }
 
 //显示键盘界面
@@ -432,10 +420,18 @@ static void App_TriggerLockout(void)
   App_PlayVoice(12u);
 }
 
+static void App_UnlockFailAlarm1s(void)
+{
+  BEEP_On();
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  BEEP_Off();
+}
+
 static void App_HandlePwdFail(void)
 {
   s_fail_count++;
   App_Deny("PWD ERR", 2u);
+  App_UnlockFailAlarm1s();
   if (s_fail_count >= 3u)
   {
     App_TriggerLockout();
@@ -509,6 +505,7 @@ static void App_HandleCard(uint32_t uid)
   else
   {
     App_Deny("CARD ERR", 2u);
+    App_UnlockFailAlarm1s();
   }
 }
 
@@ -920,7 +917,17 @@ static void App_FingerTask(void *argument)
 
   for (;;)
   {
-    (void)xQueueReceive(s_finger_q, &cmd, portMAX_DELAY);
+    if (s_finger_irq_rearm != 0u &&
+        HAL_GPIO_ReadPin(FINGER_IRQ_GPIO_Port, FINGER_IRQ_Pin) == GPIO_PIN_RESET)
+    {
+      __HAL_GPIO_EXTI_CLEAR_IT(FINGER_IRQ_Pin);
+      s_finger_irq_rearm = 0u;
+      HAL_NVIC_EnableIRQ(FINGER_IRQ_EXTI_IRQn);
+    }
+    if (xQueueReceive(s_finger_q, &cmd, s_finger_irq_rearm ? pdMS_TO_TICKS(10u) : portMAX_DELAY) != pdTRUE)
+    {
+      continue;
+    }
 
     if (cmd.cmd == FINGER_CMD_IDENTIFY)
     {
@@ -977,8 +984,7 @@ static void App_UiTask(void *argument)
   (void)argument;
   AppEvent evt;
 
-  OLED_Init();
-  OLED_Clear();
+  while (OLED_IsReady() == 0u) { vTaskDelay(pdMS_TO_TICKS(1u)); }
   for (uint8_t i = 0; i < 4u; i++)
   {
     s_lines[i][0] = '\0';
@@ -1001,6 +1007,8 @@ static void App_UiTask(void *argument)
 
   for (;;)
   {
+    /* Deferred cold-start volume restore; the UI remains responsive meanwhile. */
+    JQ8900_Process(&s_voice);
     if (xQueueReceive(s_evt_q, &evt, pdMS_TO_TICKS(200)) != pdTRUE)
     {
       if (s_lock_until != 0u)
@@ -1058,6 +1066,7 @@ static void App_UiTask(void *argument)
           else
           {
             App_Deny("FINGER ERR", 2u);
+            App_UnlockFailAlarm1s();
           }
         }
       }
@@ -1118,12 +1127,22 @@ void App_CreateTasks(void)
   s_evt_q = xQueueCreate(12, sizeof(AppEvent));//能存放12个appevent类型的事件
   s_finger_q = xQueueCreate(4, sizeof(FingerCmd));//4个fingercmd类型事件
   //任务函数，任务名称，任务栈大小（单位是字，1字=4字节），任务参数，任务优先级
-  xTaskCreate(App_InputTask, "input", 256, NULL, tskIDLE_PRIORITY + 2U, NULL);
-  xTaskCreate(App_FingerTask, "finger", 256, NULL, tskIDLE_PRIORITY + 2U, NULL);
-  xTaskCreate(App_UiTask, "ui", 256, NULL, tskIDLE_PRIORITY + 1U, NULL);
+  BaseType_t created;
+  configASSERT(s_evt_q != NULL && s_finger_q != NULL);
+  created = xTaskCreate(App_InputTask, "input", 256, NULL, tskIDLE_PRIORITY + 2U, NULL);
+  configASSERT(created == pdPASS);
+  created = xTaskCreate(App_FingerTask, "finger", 384, NULL, tskIDLE_PRIORITY + 3U, NULL);
+  configASSERT(created == pdPASS);
+  created = xTaskCreate(App_UiTask, "ui", 256, NULL, tskIDLE_PRIORITY + 1U, NULL);
+  configASSERT(created == pdPASS);
 }
 
 void FINGER_DelayMs(uint32_t ms)
+{
+  vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+void JQ8900_DelayMs(uint32_t ms)
 {
   vTaskDelay(pdMS_TO_TICKS(ms));
 }
@@ -1135,7 +1154,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     BaseType_t higher = pdFALSE;
     FingerCmd cmd = { FINGER_CMD_IDENTIFY, 0u };
     HAL_NVIC_DisableIRQ(FINGER_IRQ_EXTI_IRQn);
-    (void)xQueueSendFromISR(s_finger_q, &cmd, &higher);
+    if (s_finger_q == NULL || xQueueSendFromISR(s_finger_q, &cmd, &higher) != pdTRUE)
+    {
+      HAL_NVIC_EnableIRQ(FINGER_IRQ_EXTI_IRQn);
+    }
     portYIELD_FROM_ISR(higher);
   }
 }

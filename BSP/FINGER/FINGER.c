@@ -1,4 +1,7 @@
 #include "FINGER.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include <string.h>
 
 #define PKT_HEADER_MSB     0xEFu//包头高8位
 #define PKT_HEADER_LSB     0x01u//包头低八位
@@ -74,114 +77,154 @@ static uint16_t CalcSum(uint8_t type, uint16_t length, const uint8_t *payload, u
   return (uint16_t)sum;
 }
 
-static uint8_t UartRead(FINGER_Handle *handle, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+/* A single worker owns this transport. RX stays armed while that worker sleeps.
+ * USART3 RX/TX: DMA1 channels 3/2; HT, TC and IDLE only publish progress.
+ */
+#define RX_DMA_SIZE 256u
+static FINGER_Handle *s_owner;
+static TaskHandle_t s_waiter;
+static uint8_t s_rx_dma[RX_DMA_SIZE];
+static uint8_t s_tx_dma[9u + 1u + MAX_PARAM + 2u];
+static volatile uint32_t s_rx_produced;
+static uint32_t s_rx_consumed;
+static uint16_t s_rx_position;
+static volatile uint8_t s_io_error;
+static uint8_t s_resync;
+static uint32_t s_command_start;
+FINGER_Diagnostics g_finger_diag;
+
+static void WakeWorker(void)
 {
-  if (handle == NULL || handle->uart == NULL)
+  BaseType_t higher = pdFALSE;
+  if (s_waiter != NULL)
   {
+    vTaskNotifyGiveFromISR(s_waiter, &higher);
+    portYIELD_FROM_ISR(higher);
+  }
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size)
+{
+  (void)size;
+  if (s_owner != NULL && uart == s_owner->uart)
+  {
+    /* Read the live cursor: a delayed HT IRQ may follow a newer IDLE IRQ. */
+    uint16_t pos = (uint16_t)(RX_DMA_SIZE - __HAL_DMA_GET_COUNTER(uart->hdmarx));
+    pos %= RX_DMA_SIZE;
+    s_rx_produced += (uint16_t)((pos + RX_DMA_SIZE - s_rx_position) % RX_DMA_SIZE);
+    s_rx_position = pos;
+    WakeWorker();
+  }
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
+{
+  if (s_owner != NULL && uart == s_owner->uart) { WakeWorker(); }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
+{
+  if (s_owner != NULL && uart == s_owner->uart)
+  {
+    g_finger_diag.uart_errors++;
+    g_finger_diag.last_uart_error = uart->ErrorCode;
+    if ((uart->ErrorCode & HAL_UART_ERROR_ORE) != 0u) { g_finger_diag.overruns++; }
+    s_io_error = 1u;
+    WakeWorker();
+  }
+}
+
+static uint8_t StartReceiver(FINGER_Handle *handle)
+{
+  if (handle == NULL || handle->uart == NULL || handle->uart->hdmarx == NULL ||
+      handle->uart->hdmatx == NULL) { return 0u; }
+  (void)HAL_UART_AbortTransmit(handle->uart);
+  (void)HAL_UART_AbortReceive(handle->uart);
+  __HAL_UART_CLEAR_OREFLAG(handle->uart);
+  s_rx_produced = 0u;
+  s_rx_consumed = 0u;
+  s_rx_position = 0u;
+  s_io_error = 0u;
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  if (HAL_UARTEx_ReceiveToIdle_DMA(handle->uart, s_rx_dma, RX_DMA_SIZE) != HAL_OK)
+  {
+    s_io_error = 1u;
     return 0u;
   }
-  return (HAL_UART_Receive(handle->uart, buf, len, timeout_ms) == HAL_OK) ? 1u : 0u;
+  return 1u;
+}
+
+static uint32_t TimeLeft(uint32_t timeout_ms)
+{
+  uint32_t elapsed = HAL_GetTick() - s_command_start;
+  return (elapsed < timeout_ms) ? timeout_ms - elapsed : 0u;
+}
+
+static uint8_t UartRead(FINGER_Handle *handle, uint8_t *buf, uint16_t len, uint32_t timeout_ms)
+{
+  if (handle == NULL || handle != s_owner || s_io_error != 0u) { return 0u; }
+  while (len != 0u)
+  {
+    uint32_t available = s_rx_produced - s_rx_consumed;
+    if (s_io_error != 0u) { return 0u; }
+    if (available > RX_DMA_SIZE)
+    {
+      g_finger_diag.ring_overflows++;
+      s_io_error = 1u;
+      return 0u;
+    }
+    if (available != 0u)
+    {
+      *buf++ = s_rx_dma[s_rx_consumed++ % RX_DMA_SIZE];
+      len--;
+    }
+    else
+    {
+      uint32_t remaining = TimeLeft(timeout_ms);
+      if (remaining == 0u) { return 0u; }
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(remaining));
+    }
+  }
+  return 1u;
 }
 
 static uint8_t ReadAck(FINGER_Handle *handle, FingerAck *ack, uint32_t timeout_ms)
 {
-  uint8_t prev = 0;
-  uint8_t byte = 0;
-  uint8_t found = 0;
-  uint32_t start = HAL_GetTick();
-
-  if (handle == NULL || ack == NULL)
+  uint8_t packet[9u + MAX_PAYLOAD + 2u];
+  uint16_t used = 0u;
+  uint8_t address[4];
+  WriteU32(address, handle->address);
+  while (TimeLeft(timeout_ms) != 0u)
   {
-    return 0u;
-  }
-
-  while ((HAL_GetTick() - start) < timeout_ms)//在超时时间内一直循环
-  {
-    if (!UartRead(handle, &byte, 1, timeout_ms))//每次只读 1 个字节
+    if (!UartRead(handle, &packet[used++], 1u, timeout_ms)) { return 0u; }
+    /* Slide past noise, invalid lengths, bad addresses and bad checksums. */
+    while (used != 0u)
     {
-      return 0u;
+      uint16_t length;
+      if (packet[0] != PKT_HEADER_MSB) { goto discard; }
+      if (used < 2u) { break; }
+      if (packet[1] != PKT_HEADER_LSB) { goto discard; }
+      if (used < 9u) { break; }
+      length = ReadU16(&packet[7]);
+      if (memcmp(&packet[2], address, 4u) != 0 || packet[6] != PKT_ACK ||
+          length < 3u || length > MAX_PAYLOAD + 2u) { goto discard; }
+      if (used < 9u + length) { break; }
+      if (ReadU16(&packet[7u + length]) !=
+          CalcSum(PKT_ACK, length, &packet[9], (uint16_t)(length - 2u)))
+      {
+        g_finger_diag.bad_packets++;
+        goto discard;
+      }
+      ack->confirm = packet[9];
+      ack->data_len = (uint16_t)(length - 3u);
+      memcpy(ack->data, &packet[10], ack->data_len);
+      g_finger_diag.received_packets++;
+      return 1u;
+    discard:
+      memmove(packet, &packet[1], --used);
     }
-    //判断：上一个字节是 0xEF 且 当前字节是 0x01 吗？
-    if (prev == PKT_HEADER_MSB && byte == PKT_HEADER_LSB)
-    {
-      // 4. 找到了包头跳出循环
-      found = 1u;
-      break;
-    }
-    // 没找到，把当前字节存起来，作为下一次判断的上一个字节
-    prev = byte;
   }
-  //超时了还没有找到，循环结束，found还没有刷新，返回0，读取失败
-  if (found == 0u)
-  {
-    return 0u;
-  }
-
-  //上面解析完成包头，下面开始解析设备地址，包标识，包长度总共7个字节
-  //参考3.2指令应答
-  //准备7个字节准备读取
-  // meta[0~3]: 设备地址 (4 bytes)
-  // meta[4]:   包标识 (1 byte)
-  // meta[5~6]: 包长度 (2 bytes)
-  uint8_t meta[7];
-  if (!UartRead(handle, meta, sizeof(meta), timeout_ms))
-  {
-    return 0u;
-  }
-
-  //读取包标识进行检验
-  uint8_t type = meta[4];
-  //读取包长度 = (1byte)确认码 + (Nbytes)返回参数 + (2bytes)校验和
-  uint16_t length = ReadU16(&meta[5]);
-  //如果读取道德包标识不为0x07或小于3直接退出，表示读取错误
-  if (type != PKT_ACK || length < 3u)
-  {
-    return 0u;
-  }
-
-  // 包长度减去2bytes为数据长度
-  uint16_t payload_len = (uint16_t)(length - 2u);
-  //如果数据长度大于数据缓冲区则返回
-  if (payload_len > MAX_PAYLOAD)
-  {
-    return 0u;
-  }
-
-  //获得数据长度则从串口读取payload_len个数据这里面包含确认码和返回参数
-  uint8_t payload[MAX_PAYLOAD];
-  if (!UartRead(handle, payload, payload_len, timeout_ms))
-  {
-    return 0u;
-  }
-
-  //读取最后两个字节的校验和
-  //至此整个应答包全部读取成功，虾米那开始解析应答包
-  uint8_t sum_bytes[2];
-  if (!UartRead(handle, sum_bytes, 2, timeout_ms))
-  {
-    return 0u;
-  }
-
-  //将读取到的校验和两个字节进行高低位兑换
-  uint16_t sum = ReadU16(sum_bytes);
-  //计算校验和
-  uint16_t calc = CalcSum(type, length, payload, payload_len);
-  //如果解析得到的校验和与包发送过来的校验和不同，则说明包错误，退出程序
-  if (sum != calc)
-  {
-    return 0u;
-  }
-
-  //将读取到的第一个数据即确认码返回给ack->confirm
-  ack->confirm = payload[0];
-  //将确认码减去即为返回参数长度
-  ack->data_len = (uint16_t)(payload_len - 1u);
-  for (uint16_t i = 0; i < ack->data_len; i++)
-  {
-    //将返回参数全部复制到应答ack结构体里面的数组，这里i+1是跳过确认码
-    ack->data[i] = payload[i + 1u];
-  }
-  return 1u;
+  return 0u;
 }
 
 static uint8_t SendCmd(FINGER_Handle *handle, uint8_t cmd, const uint8_t *params, uint16_t param_len)
@@ -190,7 +233,7 @@ static uint8_t SendCmd(FINGER_Handle *handle, uint8_t cmd, const uint8_t *params
   // 1 = 指令码
   // MAX_PARAM = 参数的最大可能长度
   // 2 = 校验和
-  uint8_t buf[9 + 1 + MAX_PARAM + 2];
+  uint8_t *buf = s_tx_dma;
   //包长度 = 指令+参数+校验和
   uint16_t length = (uint16_t)(1u + param_len + 2u);
   uint16_t idx = 0;
@@ -222,18 +265,47 @@ static uint8_t SendCmd(FINGER_Handle *handle, uint8_t cmd, const uint8_t *params
   WriteU16(&buf[idx], sum);
   idx += 2u;
   //打包好数组一次性全部发送
-  return (HAL_UART_Transmit(handle->uart, buf, idx, handle->timeout_ms) == HAL_OK) ? 1u : 0u;
+  if (HAL_UART_Transmit_DMA(handle->uart, buf, idx) != HAL_OK) { return 0u; }
+  /* DMA owns the static buffer until the UART TC interrupt (last stop bit). */
+  while (handle->uart->gState != HAL_UART_STATE_READY)
+  {
+    uint32_t remaining = TimeLeft(handle->timeout_ms);
+    if (s_io_error != 0u || remaining == 0u)
+    {
+      (void)HAL_UART_AbortTransmit(handle->uart);
+      return 0u;
+    }
+    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(remaining));
+  }
+  return 1u;
 }
 
 // 命令函数
 static uint8_t Command(FINGER_Handle *handle, uint8_t cmd, const uint8_t *params,
                        uint16_t param_len, FingerAck *ack)
 {
-  if (!SendCmd(handle, cmd, params, param_len))
+  if (handle == NULL || handle != s_owner || handle->uart == NULL) { return 0u; }
+  if (s_resync != 0u || s_io_error != 0u || handle->uart->RxState != HAL_UART_STATE_BUSY_RX)
   {
-    return 0u;
+    /* Protocol has no transaction ID. Quarantine late ACKs after a failed command. */
+    FINGER_DelayMs(handle->timeout_ms);
+    if (!StartReceiver(handle)) { return 0u; }
+    s_resync = 0u;
+    g_finger_diag.recoveries++;
   }
-  return ReadAck(handle, ack, handle->timeout_ms);
+  taskENTER_CRITICAL();
+  s_rx_consumed = s_rx_produced;
+  taskEXIT_CRITICAL();
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  s_command_start = HAL_GetTick();
+  if (SendCmd(handle, cmd, params, param_len) && ReadAck(handle, ack, handle->timeout_ms))
+  {
+    return 1u;
+  }
+  if (TimeLeft(handle->timeout_ms) == 0u) { g_finger_diag.timeouts++; }
+  (void)HAL_UART_AbortTransmit(handle->uart);
+  s_resync = 1u;
+  return 0u;
 }
 
 //等待手指按下
@@ -378,6 +450,11 @@ void FINGER_Init(FINGER_Handle *handle, UART_HandleTypeDef *uart)
   handle->uart = uart;
   handle->address = FINGER_ADDR_DEFAULT;
   handle->timeout_ms = DEFAULT_TIMEOUT_MS;
+  s_owner = handle;
+  s_waiter = xTaskGetCurrentTaskHandle();
+  s_resync = 0u;
+  memset(&g_finger_diag, 0, sizeof(g_finger_diag));
+  (void)StartReceiver(handle);
 }
 
 //设置finger模块地址
@@ -515,7 +592,7 @@ FINGER_Result FINGER_ReadIndexTable(FINGER_Handle *handle, uint8_t page, uint8_t
   {
     return FINGER_FAIL;
   }
-  if (ack.data_len > out_len)
+  if (ack.data_len != 32u || ack.data_len > out_len)
   {
     return FINGER_FAIL;
   }

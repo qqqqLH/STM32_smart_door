@@ -30,6 +30,22 @@
 #define X_WIDTH 128
 #define Y_WIDTH 64
 
+typedef struct
+{
+  volatile uint32_t blocks_sent;
+  volatile uint32_t data_bytes;
+  volatile uint32_t dma_errors;
+} OLED_Diagnostics;
+extern OLED_Diagnostics g_oled_diag;
+
+/* OLED_Task owns the bus. Once ready, wrap framebuffer drawing in Begin/End.
+ * Low-level command/IIC functions are for panel startup only. */
+void OLED_Task(void *argument);
+uint8_t OLED_IsReady(void);
+void OLED_BeginFrame(void);
+void OLED_EndFrame(void);
+void OLED_DMA_IRQHandler(void);
+
 void delay_ms(unsigned int ms);
 void OLED_GPIO_Init(void);
 

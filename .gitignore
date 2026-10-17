@@ -1,0 +1,4 @@
+# Isolated DMA verification outputs (existing tracked Keil outputs are unaffected).
+/MDK-ARM/dma_check/
+/MDK-ARM/dma_check.*
+/tests/build/

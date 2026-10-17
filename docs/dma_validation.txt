@@ -1,0 +1,79 @@
+﻿DMA 通信与屏幕刷新改造验证说明
+
+改动
+- 指纹 USART3 保持 PB10/PB11、57600、8N1；DMA1 Ch3 循环 RX，Ch2 普通 TX。
+  接收在发送前启动并持续运行。HT/TC/IDLE 中断仅发布读写位置并通知指纹任务，
+  协议解析在任务中完成；等待期间任务阻塞，不占用 CPU 轮询 UART。
+  使用 256 字节接收环，检查地址、包类型、长度、校验和；坏包可重新同步。
+  整个发送/应答共用 1000 ms 默认超时；失败后先等待一个超时窗口隔离迟到应答，
+  再清除错误、重启 DMA。协议没有事务编号，因此恢复期间不并发发送新命令。
+  索引表必须完整返回 32 字节，避免使用短回包中未初始化的内容。
+- OLED 保留 PC14=SDA、PC15=SCL、地址 0x3C 和原有列偏移 +2。
+  1024 字节帧缓冲，按 8 个页、每页 8 个 16 字节块标记变化。
+  UI 绘制期间持有帧互斥锁，后台取快照后立即释放；DMA 使用独立静态波形，
+  绘图不会覆盖正在传输的数据。传输期间再次修改同一区域会安排下一次刷新。
+  取消每行先写空格再重画；补齐空格的最终文本一次性覆盖旧内容。
+- PC14/15 无硬件 I2C 复用，故用 TIM1_UP -> DMA1 Ch5 -> GPIOC BSRR 输出总线。
+  BSRR 仅修改两个 OLED 引脚。每 bit 分为数据建立、高电平、保持三阶段，每阶段 2 us。
+  理论 SCL 约 167 kHz，单块 635 个 DMA 字，即约 1.27 ms；64 块全屏约 81.3 ms。
+  这些是波形时长计算，未计调度开销，不是硬件实测值。普通文本更新通常只改变少量块。
+  初始化仍使用软件 I2C；运行时刷屏由默认任务承载，不再每毫秒空唤醒。
+- 指纹任务优先级 3、输入 2、UI/显示 1；DMA2/3 与 USART3 IRQ 优先级 5，
+  屏幕 DMA5 IRQ 优先级 6，均满足当前 FreeRTOS FromISR 调用约束。
+  指纹按住时仅延迟重启 EXTI，工作任务仍可接收其他命令。
+
+资源与限制
+- TIM1 和 DMA1 Ch5 由 OLED 独占。USART1_RX 与 TIM4_CH3 等共享 Ch5 的请求不能开启 DMA。
+  现有蓝牙 USART1 使用字节中断，舵机 TIM4 使用 PWM，不与 OLED 冲突。
+- OLED 保留原驱动假设：不读取 ACK、不支持时钟拉伸；dma_errors 只代表 DMA/超时错误，
+  不代表屏幕确认收到数据。SCL/SDA 上升时间与模块上拉电阻需在实板上确认。
+  如出现画面异常，可把 OLED_PHASE_US 从 2 改为 4，复查连线及波形后再提速。
+- PC14/PC15 GPIO 输出速度设为 2 MHz 档；使用开漏方式。
+- FreeRTOS 堆预留由 12288 改为 9216 字节，为帧缓冲和波形留空间。
+  队列、任务和显示互斥锁创建均有断言。当前 Keil 链接 RAM 占用为 19472/20480 字节，
+  其中包含上述堆预留和启动栈；动态堆的实际剩余空间仍应在实板检查。
+- FINGER_* 业务接口由唯一指纹任务调用；底层 DMA 异步、业务结果通过既有消息队列交给 UI。
+  OLED 的绘制函数现在修改帧缓冲，调用者须先等待 OLED_IsReady，再使用 BeginFrame/EndFrame。
+  原始 IIC/命令接口仅用于显示任务初始化，不能与运行中的 DMA 并发调用。
+- USART DMA 初始化/中断在 USER CODE 区域，TIM1/屏幕 DMA 在 BSP 中初始化。
+  .ioc 已同步堆大小、默认任务栈/优先级及 OLED GPIO 速度。CubeMX 不管理自定义波形 DMA；
+  若在 CubeMX 新增 DMA/TIM1 功能，必须避免通道冲突和重复生成 IRQHandler。
+
+复现验证
+1. 在仓库根目录执行：powershell -ExecutionPolicy Bypass -File tests/run.ps1
+   需要支持 -fanalyzer 的 GCC。测试直接编译生产驱动，HAL/RTOS 用可控模型替代。
+   覆盖：分片、回绕、坏包重同步、索引表短包、总超时、ORE 恢复、TX 卡死、RX 溢出、
+   tick 回绕、迟到的 HT 事件、实际 DMA 波形解码、无变化不刷新、短文本擦除、边界、
+   发送中改画面、DMA 错误和中断丢失超时。主机模型不验证电气时序和真实调度延迟。
+2. 执行：powershell -ExecutionPolicy Bypass -File tools/build_dma.ps1
+   默认使用 C:\Keil_v5\UV4\UV4.exe，可用 -UV4 指定位置。
+   生成隔离工程和 MDK-ARM/dma_check/smart_door.hex，原有 smart_door 输出不被覆盖。
+   最新结果见 MDK-ARM/dma_check.log 与 MDK-ARM/dma_check/smart_door.map。
+
+上板检查（本次尚未执行）
+1. 快速切换菜单、连续输入密码，同时反复识别/录入指纹；确认无黑屏、残字、丢包。
+2. 调试器观察 g_finger_diag：received_packets 应增加；overruns、ring_overflows 应保持 0。
+   断开/恢复指纹串口，确认 timeouts/recoveries 增加且后续可重新通信。
+3. 观察 g_oled_diag：内容不变时 blocks_sent 应停止增长；局部改动只增加少量块。
+   dma_errors 应保持 0。抓取 PC15/PC14，核对地址、列偏移、上拉和停止条件。
+4. 检查 xPortGetMinimumEverFreeHeapSize() 和各任务 uxTaskGetStackHighWaterMark()，
+   特别是录入、配置 Flash 保存和长时间运行之后；需留足动态堆和任务栈余量。
+
+硬件 DMA 映射依据：ST RM0008 的 DMA1 request mapping / GPIO BSRR / TIM1 DMA request。
+https://www.st.com/resource/en/reference_manual/rm0008-stm32f103xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf
+
+
+2026-10-17：冷启动音量恢复修复
+实板读取确认：配置魔术数正确，保存的音量档位为 1，配置未丢失。
+用户现象是整机断电重上电声音大、仅复位 MCU 后正常，与模块冷启动时漏收早期设置命令一致。
+随项目附带的 JQ8900 V1.3 手册第 12 页说明模块上电默认音量为 20，15 页说明音量设置无应答。
+驱动现先缓存保存的档位，初始化后等待 1500 ms（保守软件裕量，非手册保证的就绪时间），
+由 UI 周期调用 Process 执行 3 次初始恢复；等待就绪不阻塞界面。
+每次播放前重新设置缓存音量，两条命令之间至少留 20 ms；UART 发送失败时不继续播放并保留重试。
+仍保持原档位映射 10/15/20/25/30，没有改动用户音量偏好和 Flash 布局。
+同时拆开原 buf[idx++] = Checksum(buf, idx) 表达式，消除 idx 读写未排序导致的未定义行为。
+单线程调用约束不变；启动窗口内多次播放请求只保留最后一次，Pause/Stop 会撤销待播放请求。
+新增 tests/test_voice.c：冷启动命令顺序、重发收敛、播放前音量、发送失败、取消、静音、tick 回绕。
+20 组主机回归测试通过，Keil 0 错误、0 警告；修复版经 ST-Link 写入、校验并复位运行。
+烧录前后最后一页 1024 字节配置逐字节相同；运行时读回音量缓存 10、初始重发已完成、UART 错误 0。
+以上运行时状态只证明 MCU 完成发送，模块没有音量 ACK；真实断电上电后的音量仍需听音验证。
